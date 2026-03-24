@@ -1,0 +1,11 @@
+{
+  "name": "oraclex-agent",
+  "type": "module",
+  "scripts": { "start": "node resolver.js" },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.36.0",
+    "ethers": "^6.11.0",
+    "node-cron": "^3.0.3",
+    "dotenv": "^16.0.0"
+  }
+}

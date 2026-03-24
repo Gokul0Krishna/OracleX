@@ -16,8 +16,8 @@ const client = new OpenAI({
 });
 
 const provider = new ethers.JsonRpcProvider(process.env.SHARDEUM_RPC);
-const wallet   = new ethers.Wallet(process.env.RESOLVER_PRIVATE_KEY, provider);
-const market   = new ethers.Contract(process.env.MARKET_ADDRESS, MARKET_ABI, wallet);
+const wallet = new ethers.Wallet(process.env.RESOLVER_PRIVATE_KEY, provider);
+const market = new ethers.Contract(process.env.MARKET_ADDRESS, MARKET_ABI, wallet);
 
 async function resolveMarket(id, question, category) {
   console.log(`\n[${new Date().toISOString()}] Resolving market ${id}: "${question}"`);
@@ -54,7 +54,7 @@ async function resolveMarket(id, question, category) {
 async function checkAndResolve() {
   try {
     const count = await market.marketCount();
-    const now   = Math.floor(Date.now() / 1000);
+    const now = Math.floor(Date.now() / 1000);
 
     for (let i = 1; i <= Number(count); i++) {
       const m = await market.getMarket(i);
@@ -68,7 +68,135 @@ async function checkAndResolve() {
   }
 }
 
+// Simple in-memory cache for news articles
+const articlesCache = new Map(); // marketId -> { question, articles: [] }
+
+// GNews Scraper function
+async function newsScraper(marketId, question, chunkIndex, totalChunks) {
+  try {
+    const apiKey = process.env.GNEWS_API_KEY;
+    if (!apiKey) {
+      console.warn(`[GNews] SKIP: GNEWS_API_KEY not set. Market ${marketId}.`);
+      return;
+    }
+
+    console.log(`\n[SCRAPER] Market ${marketId} (Chunk ${chunkIndex + 1}/${totalChunks}): Searching GNews...`);
+
+    const url = `https://gnews.io/api/v4/search?q=${encodeURIComponent(question)}&lang=en&max=5&apikey=${apiKey}`;
+    const response = await axios.get(url);
+    const articles = response.data.articles || [];
+
+    if (articles.length > 0) {
+      const existing = articlesCache.get(marketId) || { question, articles: [] };
+      existing.articles = [...existing.articles, ...articles].slice(-20); // Keep last 20 articles
+      articlesCache.set(marketId, existing);
+      console.log(`[GNews] Cached ${articles.length} new articles. Total: ${existing.articles.length}`);
+    }
+  } catch (err) {
+    console.error(`[GNews ERROR] Market ${marketId}:`, err.message);
+  }
+}
+
+async function getJuryVerdict(model, role, marketInfo, evidence) {
+  try {
+    const response = await client.chat.completions.create({
+      model: model,
+      messages: [
+        {
+          role: "system",
+          content: `You are an AI Jury Member (${role}) resolving a prediction market. Use the provided news evidence to determine the outcome. Respond ONLY with a JSON object: {"outcome": true/false, "confidence": 0-100, "reasoning": "1 sentence explaination"}.`
+        },
+        {
+          role: "user",
+          content: `Evidence from Web Search:\n${evidence}\n\nQuestion: "${marketInfo.question}"\nCategory: ${marketInfo.category}`
+        }
+      ],
+      max_tokens: 500
+    });
+
+    const text = response.choices[0].message.content.replace(/```json|```/g, "").trim();
+    return JSON.parse(text);
+  } catch (err) {
+    console.error(`  - [Jury Member Error] ${role} (${model}):`, err.message);
+    return null;
+  }
+}
+
+async function resolveMarket(id, question, category) {
+  console.log(`\n[${new Date().toISOString()}] ⚖️ JURY TRIAL: Market ${id}: "${question}"`);
+
+  const cache = articlesCache.get(id);
+  const evidenceText = cache?.articles.length
+    ? cache.articles.map((a, i) => `- ${a.title} (${a.source.name})`).join("\n")
+    : "No specific web evidence found. Use your general knowledge up to your training cutoff.";
+
+  // Define the Jury
+  const juryMembers = [
+    { model: "nvidia/nemotron-3-super-120b-a12b:free", role: "Chief Justice" },
+    { model: "nvidia/nemotron-3-super-120b-a12b:free", role: "Analyst" },
+    { model: "nvidia/nemotron-3-super-120b-a12b:free", role: "Fact-Checker" }
+  ];
+
+  console.log(`  > Deliberating with ${juryMembers.length} AI agents...`);
+  const votes = await Promise.all(juryMembers.map(m => getJuryVerdict(m.model, m.role, { question, category }, evidenceText)));
+
+  const validVotes = votes.filter(v => v !== null);
+  if (validVotes.length === 0) {
+    console.log("  ❌ Error: No jury members responded. Postponing resolution.");
+    return;
+  }
+
+  // Tally Votes
+  const yesVotes = validVotes.filter(v => v.outcome === true).length;
+  const noVotes = validVotes.filter(v => v.outcome === false).length;
+  const finalOutcome = yesVotes > noVotes;
+  const finalConfidence = Math.floor(validVotes.reduce((acc, v) => acc + v.confidence, 0) / validVotes.length);
+
+  // Combine reasoning
+  const consensusReasoning = validVotes.map(v => v.reasoning).join(" ");
+  const shortVerdict = consensusReasoning.slice(0, 150) + "..."; // Keep it concise for on-chain storage
+
+  console.log(`  > Verdict: ${finalOutcome ? "YES" : "NO"} (${yesVotes}/${validVotes.length} votes)`);
+  console.log(`  > Confidence: ${finalConfidence}%`);
+  console.log(`  > Summary: ${shortVerdict}`);
+
+  const evidenceOnChain = `[Jury ${yesVotes}-${noVotes}] ${shortVerdict}`;
+  const tx = await market.aiResolve(id, finalOutcome, evidenceOnChain, finalConfidence);
+  await tx.wait();
+
+  console.log(`  ✅ Resolved on-chain: ${tx.hash}`);
+  articlesCache.delete(id); // Clear cache
+}
+
+async function handleNewBet(id) {
+  try {
+    const m = await market.getMarket(id);
+    const now = Math.floor(Date.now() / 1000);
+    const remainingSec = Number(m.deadline) - now;
+    if (remainingSec <= 0) return;
+
+    const remainingMin = Math.floor(remainingSec / 60);
+    console.log(`New bet on market ${id}. Scheduling GNews scrapes over ${remainingMin}m.`);
+
+    const CHUNK_SIZE_MIN = 5;
+    const totalChunks = Math.max(1, Math.floor(remainingMin / CHUNK_SIZE_MIN));
+
+    for (let i = 0; i < totalChunks; i++) {
+      setTimeout(() => newsScraper(id, m.question, i, totalChunks), i * CHUNK_SIZE_MIN * 60 * 1000);
+    }
+  } catch (err) {
+    console.error("Error handling new bet:", err.message);
+  }
+}
+
+// Listen for new bets on-chain
+console.log("Listening for StakePlaced events...");
+market.on("StakePlaced", (id, user, side, amount) => {
+  console.log(`\n[EVENT] StakePlaced: Market ${id} | User: ${user} | SHM: ${ethers.formatEther(amount)}`);
+  handleNewBet(id);
+});
+
 // Check every 2 minutes
 cron.schedule("*/2 * * * *", checkAndResolve);
-console.log("OracleX AI resolver running — checking every 2 minutes...");
-checkAndResolve(); // run once immediately on start
+console.log("OracleX Decentralized Jury running — checking every 2m...");
+checkAndResolve();

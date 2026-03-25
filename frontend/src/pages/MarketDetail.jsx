@@ -5,6 +5,7 @@ import ProbabilityBar from "../components/ProbabilityBar";
 import StakeModal from "../components/StakeModal";
 import VerdictPanel from "../components/VerdictPanel";
 import CommunityThread from "../components/CommunityThread";
+import OddsChart from "../components/OddsChart";
 import { useMarket } from "../hooks/useMarket";
 import { timeLeft, formatSHM, shortenAddress, statusLabel } from "../utils/format";
 import { explorerTx, explorerAddr } from "../utils/contracts";
@@ -42,7 +43,7 @@ export default function MarketDetail() {
         />
       )}
 
-      <div className="max-w-4xl mx-auto px-4 py-8 space-y-8">
+      <div className="max-w-6xl mx-auto px-4 py-8 space-y-8">
 
         {/* Breadcrumb */}
         <button onClick={() => navigate("/")} className="text-sm font-bold text-gray-400 hover:text-purple-600 transition-colors flex items-center gap-1">
@@ -159,9 +160,14 @@ export default function MarketDetail() {
           )}
         </div>
 
-        {/* Community Thread */}
-        <div className="pt-4 border-t border-gray-100">
-          <CommunityThread marketId={id} />
+        {/* Odds Chart + Community Thread */}
+        <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
+          <div className="lg:col-span-3">
+            <OddsChart market={market} />
+          </div>
+          <div className="lg:col-span-2">
+            <CommunityThread marketId={id} />
+          </div>
         </div>
       </div>
     </div>

@@ -122,18 +122,38 @@ async function getJuryVerdict(model, role, marketInfo, evidence) {
   }
 }
 
+// Sentiment-Informed DAMM Logic
+function calculateDAMM(market, articles, confidence) {
+  const yesPool = BigInt(market.yesPool);
+  const noPool  = BigInt(market.noPool);
+  const totalPool = yesPool + noPool;
+  
+  // 1. Market Heat: Based on pool volume and news density
+  // Higher volume and more news = Hotter market
+  const poolHeat = Number(totalPool / BigInt(1e18)); // Scale to SHM
+  const newsDensity = articles.length;
+  const marketHeat = Math.min(100, Math.floor((poolHeat * 2) + (newsDensity * 5)));
+  
+  // 2. Sentiment Score: Derived from Jury confidence and pooling ratio
+  const poolRatio = totalPool > 0n ? Number((yesPool * 100n) / totalPool) : 50;
+  const sentimentScore = Math.floor((poolRatio * 0.4) + (confidence * 0.6));
+  
+  return { marketHeat, sentimentScore };
+}
+
 async function resolveMarket(id, question, category) {
   console.log(`\n[${new Date().toISOString()}] ⚖️ JURY TRIAL: Market ${id}: "${question}"`);
 
   const cache = articlesCache.get(id);
-  const evidenceText = cache?.articles.length
-    ? cache.articles.map((a, i) => `- ${a.title} (${a.source.name})`).join("\n")
-    : "No specific web evidence found. Use your general knowledge up to your training cutoff.";
+  const articles = cache?.articles || [];
+  const evidenceText = articles.length 
+    ? articles.map((a, i) => `- ${a.title} (${a.source.name})`).join("\n")
+    : "No specific web evidence found.";
 
   // Define the Jury
   const juryMembers = [
     { model: "nvidia/nemotron-3-super-120b-a12b:free", role: "Chief Justice" },
-    { model: "nvidia/nemotron-3-super-120b-a12b:free", role: "Analyst" },
+    { model: "nvidia/nemotron-3-super-120b-a12b:free", role: "DAMM Evaluator" },
     { model: "nvidia/nemotron-3-super-120b-a12b:free", role: "Fact-Checker" }
   ];
 
@@ -141,31 +161,37 @@ async function resolveMarket(id, question, category) {
   const votes = await Promise.all(juryMembers.map(m => getJuryVerdict(m.model, m.role, { question, category }, evidenceText)));
 
   const validVotes = votes.filter(v => v !== null);
-  if (validVotes.length === 0) {
-    console.log("  ❌ Error: No jury members responded. Postponing resolution.");
-    return;
-  }
+  if (validVotes.length === 0) return;
 
   // Tally Votes
   const yesVotes = validVotes.filter(v => v.outcome === true).length;
   const noVotes = validVotes.filter(v => v.outcome === false).length;
   const finalOutcome = yesVotes > noVotes;
-  const finalConfidence = Math.floor(validVotes.reduce((acc, v) => acc + v.confidence, 0) / validVotes.length);
+  const avgConfidence = Math.floor(validVotes.reduce((acc, v) => acc + v.confidence, 0) / validVotes.length);
+  
+  // Calculate DAMM Metrics
+  const m = await market.getMarket(id);
+  const { marketHeat, sentimentScore } = calculateDAMM(m, articles, avgConfidence);
+  
+  // Calculate final DAMM Odds
+  const oddsYes = sentimentScore;
+  const oddsNo  = 100 - sentimentScore;
 
-  // Combine reasoning
+  // Combine reasoning and news for on-chain storage
   const consensusReasoning = validVotes.map(v => v.reasoning).join(" ");
-  const shortVerdict = consensusReasoning.slice(0, 150) + "..."; // Keep it concise for on-chain storage
+  const topNews = articles.slice(0, 2).map((a, i) => `(${i+1}) ${a.title}`).join(" | ");
+  
+  // Enhanced On-Chain Evidence with DAMM stats including Odds
+  const evidenceOnChain = `[Consensus ${yesVotes}-${noVotes}] ${finalOutcome ? "YES" : "NO"}. Odds: Y:${oddsYes}%/N:${oddsNo}% | Heat: ${marketHeat}% | Sentiment: ${sentimentScore}% | News: ${topNews}`;
 
-  console.log(`  > Verdict: ${finalOutcome ? "YES" : "NO"} (${yesVotes}/${validVotes.length} votes)`);
-  console.log(`  > Confidence: ${finalConfidence}%`);
-  console.log(`  > Summary: ${shortVerdict}`);
+  console.log(`  > Verdict: ${finalOutcome ? "YES" : "NO"} | Odds: Y:${oddsYes}%/N:${oddsNo}% | Heat: ${marketHeat}%`);
+  console.log(`  > Storing on-chain: ${evidenceOnChain}`);
 
-  const evidenceOnChain = `[Jury ${yesVotes}-${noVotes}] ${shortVerdict}`;
-  const tx = await market.aiResolve(id, finalOutcome, evidenceOnChain, finalConfidence);
+  const tx = await market.aiResolve(id, finalOutcome, evidenceOnChain, avgConfidence);
   await tx.wait();
-
+  
   console.log(`  ✅ Resolved on-chain: ${tx.hash}`);
-  articlesCache.delete(id); // Clear cache
+  articlesCache.delete(id); 
 }
 
 async function handleNewBet(id) {

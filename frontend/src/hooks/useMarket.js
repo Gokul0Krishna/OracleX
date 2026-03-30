@@ -5,15 +5,15 @@ import { ethers } from "ethers";
 export function useMarket(id) {
   const CACHE_KEY = `oraclex_market_${id}`;
 
-  const [market,     setMarket]     = useState(() => {
+  const [market, setMarket] = useState(() => {
     const cached = localStorage.getItem(CACHE_KEY);
     return cached ? JSON.parse(cached) : null;
   });
   const [userShares, setUserShares] = useState([]);
-  const [loading,    setLoading]    = useState(!market);
-  const [txPending,  setTxPending]  = useState(false);
-  const [txHash,     setTxHash]     = useState(null);
-  const [error,      setError]      = useState(null);
+  const [loading, setLoading] = useState(!market);
+  const [txPending, setTxPending] = useState(false);
+  const [txHash, setTxHash] = useState(null);
+  const [error, setError] = useState(null);
   const [walletBalance, setWalletBalance] = useState("0");
 
   useEffect(() => {
@@ -23,14 +23,14 @@ export function useMarket(id) {
         const c = getReadContract();
         const m = await c.getMarket(id);
         const data = {
-          id: m.id.toString(), 
-          question: m.question, 
+          id: m.id.toString(),
+          question: m.question,
           category: m.category,
           options: m.options,
-          deadline: m.deadline.toString(), 
+          deadline: m.deadline.toString(),
           creator: m.creator,
-          status: Number(m.status), 
-          outcomeIndex: Number(m.outcomeIndex), 
+          status: Number(m.status),
+          outcomeIndex: Number(m.outcomeIndex),
           aiEvidence: m.aiEvidence,
           shareReserves: m.shareReserves.map(p => p.toString()),
           totalSets: m.totalSets.toString(),
@@ -47,8 +47,8 @@ export function useMarket(id) {
           const wallet = await c.getWalletBalance(mockUser);
           setWalletBalance(wallet.toString());
         } else if (window.ethereum) {
-          const provider  = new ethers.BrowserProvider(window.ethereum);
-          const accounts  = await provider.listAccounts();
+          const provider = new ethers.BrowserProvider(window.ethereum);
+          const accounts = await provider.listAccounts();
           if (accounts.length > 0) {
             const user = accounts[0].address;
             const balances = await c.getUserShares(id, user);
@@ -66,7 +66,7 @@ export function useMarket(id) {
   async function buyShares(optionIndex, amountEth) {
     setTxPending(true); setError(null); setTxHash(null);
     try {
-      const c  = await getWriteContract();
+      const c = await getWriteContract();
       const tx = await c.buyShares(id, optionIndex, { value: ethers.parseEther(amountEth) });
       setTxHash(tx.hash);
       await tx.wait();
@@ -89,7 +89,7 @@ export function useMarket(id) {
   async function sellShares(optionIndex, amountShares) {
     setTxPending(true); setError(null); setTxHash(null);
     try {
-      const c  = await getWriteContract();
+      const c = await getWriteContract();
       const tx = await c.sellShares(id, optionIndex, amountShares);
       setTxHash(tx.hash);
       await tx.wait();
@@ -112,7 +112,7 @@ export function useMarket(id) {
   async function claimReward() {
     setTxPending(true); setError(null); setTxHash(null);
     try {
-      const c  = await getWriteContract();
+      const c = await getWriteContract();
       const tx = await c.claimReward(id);
       setTxHash(tx.hash);
       await tx.wait();
